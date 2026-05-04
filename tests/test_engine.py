@@ -1,8 +1,3 @@
-"""
-tests/test_engine.py — Unit and integration tests for the EvoDoc Drug Safety Engine.
-
-Run with:  pytest tests/ -v --tb=short
-"""
 from __future__ import annotations
 
 import asyncio

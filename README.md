@@ -15,9 +15,9 @@ Produces more conservative "flag and review" responses on uncertain interactions
 ```
 POST /analyse
      │
-     ├── Validate input 
+     ├── Validate input
      │
-     ├── Check cache 
+     ├── Check cache
      │     └── HIT → return cached result immediately
      │
      ├── RULE ENGINE (always runs, no LLM needed):
@@ -97,67 +97,178 @@ docker run -d -p 6379:6379 redis:7-alpine
 
 ## API Usage
 
-### POST /analyse
+### POST /analyse — Drug safety check
+
+The main endpoint. Send medicines + patient history, get back a full safety assessment.
+
+**Request body:**
+
+```json
+{
+  "proposed_medicines": ["Warfarin", "Aspirin", "Amoxicillin"],
+  "patient_history": {
+    "current_medications": ["Metformin", "Atenolol"],
+    "known_allergies": ["penicillin"],
+    "conditions": ["diabetes", "kidney disease"],
+    "age": 67,
+    "weight": 72.5
+  }
+}
+```
+
+**Local:**
 
 ```bash
 curl -X POST http://localhost:8000/analyse \
   -H "Content-Type: application/json" \
-  -d '{
-    "proposed_medicines": ["Warfarin", "Aspirin", "Amoxicillin"],
-    "patient_history": {
-      "current_medications": ["Metformin", "Atenolol"],
-      "known_allergies": ["penicillin"],
-      "conditions": ["diabetes", "kidney disease"],
-      "age": 67,
-      "weight": 72.5
-    }
-  }'
+  -d '{"proposed_medicines":["Warfarin","Aspirin","Amoxicillin"],"patient_history":{"current_medications":["Metformin","Atenolol"],"known_allergies":["penicillin"],"conditions":["diabetes","kidney disease"],"age":67,"weight":72.5}}'
 ```
 
-**Example response:**
+**Deployed:**
+
+```bash
+curl -X POST https://web-production-60757.up.railway.app/analyse \
+  -H "Content-Type: application/json" \
+  -d '{"proposed_medicines":["Warfarin","Aspirin","Amoxicillin"],"patient_history":{"current_medications":["Metformin","Atenolol"],"known_allergies":["penicillin"],"conditions":["diabetes","kidney disease"],"age":67,"weight":72.5}}'
+```
+
+**Response fields explained:**
+
+| Field                     | What it means                                                          |
+| ------------------------- | ---------------------------------------------------------------------- |
+| `interactions`            | Drug pairs that clash, with mechanism and what the doctor should do    |
+| `allergy_alerts`          | Medicines that match the patient's known allergies or their drug class |
+| `contraindication_alerts` | Medicines dangerous given the patient's conditions                     |
+| `safe_to_prescribe`       | False if any critical or high severity finding exists                  |
+| `overall_risk_level`      | high / medium / low — derived from all findings combined               |
+| `requires_doctor_review`  | True if LLM was uncertain, or fallback fired, or any critical finding  |
+| `source`                  | "llm" if Meditron answered, "fallback" if rule engine was used         |
+| `cache_hit`               | True if this exact patient history was checked before within the hour  |
+| `processing_time_ms`      | How long the full analysis took                                        |
+| `patient_risk_score`      | 0–100 score combining all findings (Bonus B)                           |
+| `risk_score_breakdown`    | Exact points from interactions, allergies, and contraindications       |
+
+---
+
+### GET /health — Service status
+
+Check if the server is running and whether Ollama is reachable.
+
+```bash
+# Local
+curl http://localhost:8000/health
+
+# Deployed
+curl https://web-production-60757.up.railway.app/health
+```
+
+**Response:**
 
 ```json
 {
+  "status": "ok",
+  "llm_backend": "http://localhost:11434",
+  "llm_model": "meditron",
+  "llm_status": "available",
+  "fallback_available": true,
+  "cache_backend": "memory"
+}
+```
+
+`llm_status` will show `"unavailable"` on the deployed version since Ollama runs locally only. `fallback_available` will always be `true` — the rule engine never goes down.
+
+---
+
+### GET /cache/stats — Cache status
+
+See how many results are currently cached.
+
+```bash
+# Local
+curl http://localhost:8000/cache/stats
+
+# Deployed
+curl https://web-production-60757.up.railway.app/cache/stats
+```
+
+**Response:**
+
+```json
+{
+  "backend": "memory",
+  "entries": 3
+}
+```
+
+If you set `REDIS_URL` in your `.env`, backend will show `"redis"` instead of `"memory"`.
+
+---
+
+### GET /interactions/fallback — Fallback interaction rules
+
+Returns all 22 hardcoded drug interactions used when the LLM is unavailable. Useful for auditing what the rule engine knows.
+
+```bash
+# Local
+curl http://localhost:8000/interactions/fallback
+
+# Deployed
+curl https://web-production-60757.up.railway.app/interactions/fallback
+```
+
+**Response:**
+
+```json
+{
+  "count": 22,
   "interactions": [
     {
-      "drug_a": "Warfarin",
-      "drug_b": "Aspirin",
+      "drug_a": "warfarin",
+      "drug_b": "aspirin",
       "severity": "high",
-      "mechanism": "Warfarin inhibits clotting factor synthesis; aspirin inhibits platelet aggregation via COX-1, producing additive bleeding risk.",
-      "clinical_recommendation": "Avoid concurrent use unless clinically indicated. If necessary, use lowest effective aspirin dose (75 mg) and monitor INR closely.",
+      "mechanism": "...",
+      "clinical_recommendation": "...",
       "source_confidence": "high"
-    }
-  ],
-  "allergy_alerts": [
+    },
+    ...
+  ]
+}
+```
+
+---
+
+### Interactive docs (Swagger UI)
+
+FastAPI automatically generates an interactive API explorer. You can test every endpoint from the browser without Postman or curl.
+
+```
+Local:    http://localhost:8000/docs
+Deployed: https://web-production-60757.up.railway.app/docs
+```
+
+Click any endpoint → **Try it out** → fill in the body → **Execute**.
+
+---
+
+### Validation errors (422)
+
+The API validates every input and returns clear errors for bad data:
+
+```bash
+# Empty medicine list
+curl -X POST http://localhost:8000/analyse \
+  -H "Content-Type: application/json" \
+  -d '{"proposed_medicines":[],"patient_history":{}}'
+
+# Response:
+{
+  "detail": [
     {
-      "medicine": "Amoxicillin",
-      "reason": "Patient has a documented penicillin allergy. Amoxicillin belongs to the penicillin drug class.",
-      "severity": "critical",
-      "allergy_class": "penicillin"
+      "loc": ["body", "proposed_medicines"],
+      "msg": "List should have at least 1 item after validation",
+      "type": "too_short"
     }
-  ],
-  "contraindication_alerts": [
-    {
-      "medicine": "Aspirin",
-      "condition": "kidney disease",
-      "reason": "NSAIDs reduce renal prostaglandin-mediated afferent arteriolar dilation, precipitating acute kidney injury.",
-      "severity": "high"
-    }
-  ],
-  "safe_to_prescribe": false,
-  "overall_risk_level": "high",
-  "requires_doctor_review": true,
-  "source": "llm",
-  "cache_hit": false,
-  "processing_time_ms": 1840,
-  "patient_risk_score": 85,
-  "risk_score_breakdown": {
-    "interaction_score": 20.0,
-    "allergy_score": 20.0,
-    "contraindication_score": 12.0,
-    "total": 52.0,
-    "explanation": "Score derived from 1 drug interaction(s) (20/40 pts), 1 allergy alert(s) (20/35 pts), and 1 contraindication(s) (12/25 pts)."
-  }
+  ]
 }
 ```
 
